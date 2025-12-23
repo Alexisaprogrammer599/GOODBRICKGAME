@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Generic Game Logic Engine</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        #toolbar { background: #333; padding: 10px; display: flex; gap: 10px; border-bottom: 2px solid #000; }
+        button { padding: 8px 12px; cursor: pointer; background: #555; color: white; border: none; border-radius: 4px; font-weight: bold; }
+        button:hover { background: #777; }
+        #workspace { position: relative; flex-grow: 1; display: flex; }
+        canvas { display: block; }
+        #game-view { 
+            position: absolute; top: 20px; right: 20px; 
+            width: 300px; height: 200px; 
+            background: #000; border: 2px solid #fff; 
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #game-overlay { position: absolute; top: 0; left: 0; color: white; padding: 5px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="toolbar">
+    <button onclick="addNode('Button')">Add Button Input</button>
+    <button onclick="addNode('Timer')">Add Timer Logic</button>
+    <button onclick="addNode('Math')">Add Math (+)</button>
+    <button onclick="addNode('Player')">Add Player Output</button>
+    <button onclick="clearConnections()" style="background: #a33;">Clear Wires</button>
+    <div style="color: #aaa; margin-left: auto; align-self: center;">Left Click to Drag | Right Click port to Wire</div>
+</div>
+
+<div id="workspace">
+    <canvas id="nodeCanvas"></canvas>
+    <div id="game-view">
+        <canvas id="gameCanvas" width="300" height="200"></canvas>
+        <div id="game-overlay">GAME SCREEN</div>
+    </div>
+</div>
+
+<script>
+/**
+ * ENGINE CORE
+ * -----------------------------
+ * 1. Node Class: The base for all blocks.
+ * 2. Wire System: Connects Node Output -> Node Input.
+ * 3. Execution Loop: Updates logic 60 times a second.
+ */
+
+const canvas = document.getElementById('nodeCanvas');
+const ctx = canvas.getContext('2d');
+const gameCanvas = document.getElementById('gameCanvas');
+const gameCtx = gameCanvas.getContext('2d');
+
+// Resize handling
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight - 50; // toolbar height
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- STATE ---
+let nodes = [];
+let connections = []; // { fromNode, fromPort, toNode, toPort }
+let draggingNode = null;
+let wiringStart = null; // { node, portType, portIndex }
+let keys = {}; // Input tracking
+
+// --- NODE TYPES ---
+class Node {
+    constructor(x, y, title, inputs, outputs, color) {
+        this.x = x;
+        this.y = y;
+        this.w = 120;
+        this.h = 40 + Math.max(inputs.length, outputs.length) * 20;
+        this.title = title;
+        this.inputs = inputs; // Array of names
+        this.outputs = outputs; // Array of names
+        this.color = color;
+        this.inputValues = new Array(inputs.length).fill(0);
+        this.outputValues = new Array(outputs.length).fill(0);
+        this.id = Math.random().toString(36).substr(2, 9);
+    }
+
+    update() {
+        // To be overridden by subclasses
+    }
+
+    draw(ctx) {
+        // Draw Box
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.roundRect(this.x, this.y, this.w, this.h, 8);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Title
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 12px monospace';
+        ctx.fillText(this.title, this.x + 10, this.y + 20);
+
+        // Draw Ports
+        ctx.fillStyle = '#000';
+        // Inputs (Left)
+        this.inputs.forEach((label, i) => {
+            let py = this.y + 35 + i * 20;
+            ctx.beginPath(); ctx.arc(this.x, py, 5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#ddd'; ctx.font = '10px sans-serif';
+            ctx.fillText(label, this.x + 8, py + 3);
+            ctx.fillStyle = '#000';
+        });
+        // Outputs (Right)
+        this.outputs.forEach((label, i) => {
+            let py = this.y + 35 + i * 20;
+            ctx.beginPath(); ctx.arc(this.x + this.w, py, 5, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#ddd'; ctx.font = '10px sans-serif';
+            ctx.fillText(label, this.x + this.w - 8 - ctx.measureText(label).width, py + 3);
+            ctx.fillStyle = '#000';
+        });
+    }
+
+    getPortPos(type, index) {
+        let py = this.y + 35 + index * 20;
+        return { x: type === 'in' ? this.x : this.x + this.w, y: py };
+    }
+}
+
+// --- SPECIFIC LOGIC NODES (The "Nodon" replacements) ---
+
+class ButtonNode extends Node {
+    constructor(x, y, key) {
+        super(x, y, `Key: ${key}`, [], ['Signal'], '#d33');
+        this.key = key;
+    }
+    update() {
+        this.outputValues[0] = keys[this.key] ? 1 : 0;
+    }
+}
+
+class TimerNode extends Node {
+    constructor(x, y) {
+        super(x, y, "Pulse/Timer", ['Trigger'], ['Out'], '#3a3');
+        this.timer = 0;
+    }
+    update() {
+        // Simple logic: if input > 0, output oscillates
+        if (this.inputValues[0] > 0) {
+            this.timer++;
+            this.outputValues[0] = Math.sin(this.timer * 0.1) > 0 ? 1 : 0;
+        } else {
+            this.outputValues[0] = 0;
+        }
+    }
+}
+
+class MathNode extends Node {
+    constructor(x, y) {
+        super(x, y, "Math (+)", ['A', 'B'], ['Result'], '#33d');
+    }
+    update() {
+        this.outputValues[0] = this.inputValues[0] + this.inputValues[1];
+    }
+}
+
+// The Game Object that appears on the small screen
+class PlayerNode extends Node {
+    constructor(x, y) {
+        super(x, y, "Player Box", ['X Move', 'Y Move'], [], '#d80');
+        this.px = 150;
+        this.py = 100;
+    }
+    update() {
+        // Move based on inputs
+        this.px += (this.inputValues[0] || 0) * 2;
+        this.py += (this.inputValues[1] || 0) * 2;
+
+        // Keep bounds
+        this.px = Math.max(0, Math.min(300, this.px));
+        this.py = Math.max(0, Math.min(200, this.py));
+    }
+    drawGame(ctx) {
+        ctx.fillStyle = '#0ff';
+        ctx.fillRect(this.px - 10, this.py - 10, 20, 20);
+    }
+}
+
+// --- INITIALIZATION ---
+// Create a default setup similar to the first GBG tutorial
+nodes.push(new ButtonNode(50, 50, 'ArrowRight'));
+nodes.push(new ButtonNode(50, 150, 'ArrowLeft'));
+nodes.push(new MathNode(250, 100)); // We'll use this as a combiner (Right - Left)
+nodes.push(new PlayerNode(450, 100));
+
+// --- INPUT HANDLING ---
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+// --- INTERACTION (Drag & Wire) ---
+function getDist(p1, p2) { return Math.sqrt((p1.x-p2.x)**2 + (p1.y-p2.y)**2); }
+
+canvas.addEventListener('mousedown', e => {
+    const mx = e.clientX;
+    const my = e.clientY - 50; // offset toolbar
+
+    // Check for port clicks (Wiring)
+    if (e.button === 2) { // Right click
+        for (let n of nodes) {
+            // Check outputs
+            n.outputs.forEach((_, i) => {
+                let p = n.getPortPos('out', i);
+                if (getDist({x:mx, y:my}, p) < 10) wiringStart = { node: n, type: 'out', index: i };
+            });
+            // Check inputs
+            n.inputs.forEach((_, i) => {
+                let p = n.getPortPos('in', i);
+                if (getDist({x:mx, y:my}, p) < 10) wiringStart = { node: n, type: 'in', index: i };
+            });
+        }
+        return;
+    }
+
+    // Check for node body clicks (Dragging)
+    for (let i = nodes.length - 1; i >= 0; i--) {
+        let n = nodes[i];
+        if (mx > n.x && mx < n.x + n.w && my > n.y && my < n.y + n.h) {
+            draggingNode = { node: n, offX: mx - n.x, offY: my - n.y };
+            // Move to front
+            nodes.push(nodes.splice(i, 1)[0]);
+            return;
+        }
+    }
+});
+
+canvas.addEventListener('mousemove', e => {
+    const mx = e.clientX;
+    const my = e.clientY - 50;
+    if (draggingNode) {
+        draggingNode.node.x = mx - draggingNode.offX;
+        draggingNode.node.y = my - draggingNode.offY;
+    }
+});
+
+canvas.addEventListener('mouseup', e => {
+    const mx = e.clientX;
+    const my = e.clientY - 50;
+    
+    // Complete Wiring
+    if (wiringStart) {
+        for (let n of nodes) {
+            let target = null;
+            // If started at Out, look for In
+            if (wiringStart.type === 'out') {
+                n.inputs.forEach((_, i) => {
+                    if (getDist({x:mx, y:my}, n.getPortPos('in', i)) < 15) {
+                        connections.push({ fromNode: wiringStart.node, fromPort: wiringStart.index, toNode: n, toPort: i });
+                    }
+                });
+            } 
+            // If started at In, look for Out
+            else if (wiringStart.type === 'in') {
+                n.outputs.forEach((_, i) => {
+                    if (getDist({x:mx, y:my}, n.getPortPos('out', i)) < 15) {
+                        connections.push({ fromNode: n, fromPort: i, toNode: wiringStart.node, toPort: wiringStart.index });
+                    }
+                });
+            }
+        }
+    }
+
+    draggingNode = null;
+    wiringStart = null;
+});
+
+// Prevent context menu on right click
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// --- TOOLBAR FUNCTIONS ---
+function addNode(type) {
+    let x = 50 + Math.random() * 50;
+    let y = 50 + Math.random() * 50;
+    if (type === 'Button') nodes.push(new ButtonNode(x, y, 'Space'));
+    if (type === 'Timer') nodes.push(new TimerNode(x, y));
+    if (type === 'Math') nodes.push(new MathNode(x, y));
+    if (type === 'Player') nodes.push(new PlayerNode(x, y));
+}
+function clearConnections() { connections = []; }
+
+// --- MAIN LOOP ---
+function loop() {
+    // 1. UPDATE LOGIC
+    // Reset inputs
+    nodes.forEach(n => n.inputValues.fill(0));
+    
+    // Pass data through wires
+    connections.forEach(c => {
+        let val = c.fromNode.outputValues[c.fromPort];
+        // In GBG, inputs often sum up if multiple wires connect to one port
+        c.toNode.inputValues[c.toPort] += val; 
+    });
+
+    // Run node logic
+    nodes.forEach(n => n.update());
+
+    // 2. DRAW EDITOR
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw Connections
+    connections.forEach(c => {
+        let p1 = c.fromNode.getPortPos('out', c.fromPort);
+        let p2 = c.toNode.getPortPos('in', c.toPort);
+        
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        // Bezier curve for nice wires
+        ctx.bezierCurveTo(p1.x + 50, p1.y, p2.x - 50, p2.y, p2.x, p2.y);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 + c.fromNode.outputValues[c.fromPort]})`; // Brighten if active
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    });
+
+    // Draw Wiring Line (if dragging)
+    if (wiringStart) {
+        let p1 = wiringStart.node.getPortPos(wiringStart.type, wiringStart.index);
+        // Mouse pos (we have to get it from somewhere, simplified here to just not drawing dynamic line for brevity, 
+        // but normally you'd track mouse pos globally)
+    }
+
+    nodes.forEach(n => n.draw(ctx));
+
+    // 3. DRAW GAME SCREEN
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillRect(0, 0, 300, 200);
+    
+    // Draw grid
+    gameCtx.strokeStyle = '#333';
+    gameCtx.beginPath();
+    for(let i=0; i<300; i+=20) { gameCtx.moveTo(i,0); gameCtx.lineTo(i,200); }
+    for(let i=0; i<200; i+=20) { gameCtx.moveTo(0,i); gameCtx.lineTo(300,i); }
+    gameCtx.stroke();
+
+    // Render Player Nodes
+    nodes.forEach(n => {
+        if (n instanceof PlayerNode) n.drawGame(gameCtx);
+    });
+
+    requestAnimationFrame(loop);
+}
+loop();
+
+</script>
+</body>
+</html>
